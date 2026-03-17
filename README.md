@@ -1,0 +1,2 @@
+# gal124
+belajar 
