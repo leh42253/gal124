@@ -1,0 +1,103 @@
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, Browsers } = require("@whiskeysockets/bai>
+const { Boom } = require("@hapi/boom");
+const qrcode = require("qrcode-terminal");
+const pino = require("pino");
+const axios = require("axios");
+
+// Objek untuk menyimpan link sementara berdasarkan nomor pengirim
+let session = {};
+
+async function startBot() {
+    const { state, saveCreds } = await useMultiFileAuthState('auth_session');
+    const { version } = await fetchLatestBaileysVersion();
+
+    const sock = makeWASocket({
+        version,
+        auth: state,
+        logger: pino({ level: "silent" }),
+        browser: Browsers.macOS('Desktop'),
+        syncFullHistory: false
+    });
+
+    sock.ev.on('creds.update', saveCreds);
+
+    sock.ev.on('connection.update', (update) => {
+        const { connection, lastDisconnect, qr } = update;
+        if (qr) {
+            console.log('--- SCAN QR DI BAWAH INI ---');
+            qrcode.generate(qr, { small: true });
+        }
+        if (connection === 'close') {
+            const statusCode = (lastDisconnect.error instanceof Boom)?.output?.statusCode;
+            if (statusCode !== DisconnectReason.loggedOut) setTimeout(() => startBot(), 3000);
+        } else if (connection === 'open') {
+            console.log('✅ BOT TIKTOK (VIDEO/MP3) ONLINE!');
+        }
+    });
+
+    sock.ev.on('messages.upsert', async ({ messages }) => {
+        const msg = messages[0];
+        if (!msg.message || msg.key.fromMe) return;
+
+        const from = msg.key.remoteJid;
+        const text = (msg.message.conversation || msg.message.extendedTextMessage?.text || "").trim();
+
+        // TAHAP 1: Menerima Link
+        if (text.startsWith("/menu")) {
+            const url = text.split(" ")[1];
+            if (!url || !url.includes("tiktok.com")) {
+                return await sock.sendMessage(from, { text: "❌ Gunakan: /menu [link tiktok]" });
+            }
+
+            // Simpan link ke dalam sesi
+            session[from] = url;
+
+            const menuTeks = `🎥 *TIKTOK DOWNLOADER* 🎥\n\n` +
+                             `Silahkan pilih format:\n` +
+                             `1. Video (Tanpa Watermark😈😈)\n` +
+                             `2. Audio (MP3😈😈)\n\n` +
+                             `*Balas dengan angka 1 atau 2*`;
+
+            await sock.sendMessage(from, { text: menuTeks });
+        }
+
+        // TAHAP 2: Memproses Pilihan Angka
+        else if (session[from]) {
+            const savedUrl = session[from];
+
+            if (text === "1") {
+                await sock.sendMessage(from, { text: "⏳ Sedang mengirim Video..." });
+                try {
+                    const res = await axios.get(`https://www.tikwm.com/api/?url=${savedUrl}`);
+                    const data = res.data.data;
+                    await sock.sendMessage(from, {
+                        video: { url: data.play },
+                        caption: `✅ *Video Berhasil!* \n📌 ${data.title}`
+                    });
+                } catch (e) {
+                    await sock.sendMessage(from, { text: "⚠️ Gagal mendownload video." });
+                }
+                delete session[from]; // Hapus sesi
+            }
+
+            else if (text === "2") {
+                await sock.sendMessage(from, { text: "⏳ Sedang mengirim Audio (MP3)..." });
+                try {
+                    const res = await axios.get(`https://www.tikwm.com/api/?url=${savedUrl}`);
+                    const data = res.data.data;
+                    await sock.sendMessage(from, {
+                        audio: { url: data.music },
+                        mimetype: 'audio/mp4', // Supaya bisa diputar langsung di WA
+                        ptt: false
+                    });
+                    await sock.sendMessage(from, { text: `✅ *MP3 Berhasil!* \n🎵 ${data.music_info.title}` });
+                } catch (e) {
+                    await sock.sendMessage(from, { text: "⚠️ Gagal mendownload MP3." });
+                }
+                delete session[from]; // Hapus sesi
+            }
+        }
+    });
+}
+
+startBot();
